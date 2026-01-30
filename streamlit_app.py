@@ -1,56 +1,79 @@
 import streamlit as st
-from openai import OpenAI
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+import requests
+import json
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+st.set_page_config(page_title="Grimoire Agent UI", page_icon="🪄")
+st.title("🪄 Grimoire Editor Agent")
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+# --- 1. GOOGLE AUTHENTICATION ---
+try:
+    creds_info = st.secrets["gcp_service_account"]
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info, 
+        scopes=['https://www.googleapis.com/auth/documents', 'https://www.googleapis.com/auth/drive']
+    )
+    docs_service = build('docs', 'v1', credentials=creds)
+    st.sidebar.success("✅ Google Systems Online")
+except Exception as e:
+    st.sidebar.error(f"❌ Google Setup Error: {e}")
+    st.stop()
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# --- 2. OPENROUTER LOGIC (No OpenAI Library Needed) ---
+st.sidebar.divider()
+or_key = st.sidebar.text_input("OpenRouter API Key", type="password", value=st.secrets.get("OPENROUTER_API_KEY", ""))
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+def call_openrouter(prompt):
+    headers = {
+        "Authorization": f"Bearer {or_key}",
+        "HTTP-Referer": "http://localhost:8501", # Required by OpenRouter
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "openrouter/auto", 
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, data=json.dumps(data))
+    return response.json()['choices'][0]['message']['content']
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# --- 3. AGENT BRAIN ---
+st.subheader("🤖 Request New Revisions")
+user_instruction = st.text_input("Instruction (e.g., 'Suggest 3 visceral YA metaphors for a cold room')")
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+if st.button("Ask Chimera"):
+    if not or_key:
+        st.error("Please enter your OpenRouter Key in the sidebar.")
+    else:
+        with st.spinner("Consulting the Grimoire..."):
+            answer = call_openrouter(user_instruction)
+            st.info(answer)
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# --- 4. BATCH EDIT TABLE ---
+st.divider()
+st.subheader("📝 Batch Edit Commands")
+doc_id = st.text_input("Document ID", "1VE-YIgjO33Heb7iIma2lJ23B90Rdaqq5gWsEbcfL2VE")
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+if 'rows' not in st.session_state:
+    st.session_state.rows = [{"Find": "", "Replace With": ""}]
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+edit_df = st.data_editor(st.session_state.rows, num_rows="dynamic", use_container_width=True)
+
+if st.button("🚀 Execute Batch Revisions"):
+    commands = [row for row in edit_df if row["Find"].strip() != ""]
+    if commands:
+        with st.spinner("Writing to Doc..."):
+            try:
+                requests_list = []
+                for cmd in commands:
+                    requests_list.append({
+                        'replaceAllText': {
+                            'containsText': {'text': cmd["Find"], 'matchCase': True},
+                            'replaceText': cmd["Replace With"]
+                        }
+                    })
+                docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests_list}).execute()
+                st.success("Revisions complete!")
+                st.balloons()
+            except Exception as e:
+                st.error(f"Error: {e}")
