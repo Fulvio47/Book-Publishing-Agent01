@@ -4,122 +4,115 @@ from googleapiclient.discovery import build
 import requests
 import json
 
-# --- 1. PAGE CONFIG & UI STYLE ---
+# --- 1. PAGE SETUP ---
 st.set_page_config(page_title="Grimoire Master Agent", layout="wide", page_icon="🔮")
 
-# Custom CSS for a cleaner "Agent" look
-st.markdown("""
-    <style>
-    .status-box { padding: 10px; border-radius: 5px; margin-bottom: 10px; }
-    .stChatFloatingInputContainer { bottom: 20px; }
-    </style>
-    """, unsafe_allow_name_with_html=True)
+# Safer CSS Injection
+st.markdown("### 🔮 Grimoire Master Agent")
 
-# --- 2. CONNECTOR LOGIC (The Pyroid3 Brain) ---
-def initialize_connectors():
-    status = {"docs": False, "sheets": False, "drive": False, "openrouter": False}
+# --- 2. CONNECTOR LOGIC ---
+def check_connections():
+    results = {"docs": "🔴", "sheets": "🔴", "drive": "🔴", "chimera": "🔴"}
+    services = {"docs": None, "sheets": None, "drive": None}
+    
     try:
-        creds_info = st.secrets["gcp_service_account"]
-        creds = service_account.Credentials.from_service_account_info(
-            creds_info, 
-            scopes=[
-                'https://www.googleapis.com/auth/documents',
-                'https://www.googleapis.com/auth/drive',
-                'https://www.googleapis.com/auth/spreadsheets'
-            ]
-        )
-        # Services
-        docs = build('docs', 'v1', credentials=creds)
-        sheets = build('sheets', 'v4', credentials=creds)
-        drive = build('drive', 'v3', credentials=creds)
-        
-        status["docs"] = True
-        status["sheets"] = True
-        status["drive"] = True
-        
-        # OpenRouter Check
-        or_key = st.secrets.get("OPENROUTER_API_KEY") or st.sidebar.text_input("OR Key", type="password")
-        if or_key:
-            status["openrouter"] = True
-            
-        return docs, sheets, drive, or_key, status
+        if "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+            creds = service_account.Credentials.from_service_account_info(
+                info, 
+                scopes=[
+                    'https://www.googleapis.com/auth/documents',
+                    'https://www.googleapis.com/auth/drive',
+                    'https://www.googleapis.com/auth/spreadsheets'
+                ]
+            )
+            services["docs"] = build('docs', 'v1', credentials=creds)
+            services["sheets"] = build('sheets', 'v4', credentials=creds)
+            services["drive"] = build('drive', 'v3', credentials=creds)
+            results["docs"], results["sheets"], results["drive"] = "🟢", "🟢", "🟢"
     except Exception as e:
-        st.error(f"Connector Error: {e}")
-        return None, None, None, None, status
+        st.sidebar.error(f"Google Connection Failed: {e}")
 
-docs_api, sheets_api, drive_api, OR_KEY, conn_status = initialize_connectors()
+    if st.secrets.get("OPENROUTER_API_KEY"):
+        results["chimera"] = "🟢"
+        
+    return services, results
 
-# --- 3. UI: STATUS HEADER ---
-st.title("🔮 Grimoire Master Agent")
-cols = st.columns(4)
-with cols[0]: st.metric("Google Docs", "Connected" if conn_status["docs"] else "Offline")
-with cols[1]: st.metric("Google Sheets", "Connected" if conn_status["sheets"] else "Offline")
-with cols[2]: st.metric("Google Drive", "Connected" if conn_status["drive"] else "Offline")
-with cols[3]: st.metric("OpenRouter", "Active" if conn_status["openrouter"] else "Missing Key")
+apis, status = check_connections()
+
+# --- 3. STATUS HEADER ---
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Docs API", status["docs"])
+col2.metric("Sheets API", status["sheets"])
+col3.metric("Drive API", status["drive"])
+col4.metric("Chimera (OR)", status["chimera"])
 
 st.divider()
 
-# --- 4. WORKSPACE SELECTOR ---
-with st.expander("📂 Workspace Configuration", expanded=True):
+# --- 4. WORKSPACE CONFIG ---
+with st.expander("📂 Workspace & File IDs", expanded=True):
     c1, c2 = st.columns(2)
-    with c1:
-        doc_id = st.text_input("Manuscript (Doc ID)", "1VE-YIgjO33Heb7iIma2lJ23B90Rdaqq5gWsEbcfL2VE")
-    with c2:
-        sheet_id = st.text_input("Critique Tracker (Sheet ID)", "")
+    doc_id = c1.text_input("Active Manuscript (Doc ID)", "1VE-YIgjO33Heb7iIma2lJ23B90Rdaqq5gWsEbcfL2VE")
+    sheet_id = c2.text_input("Critique Tracker (Sheet ID)", "")
 
-# --- 5. CHAT INTERFACE (The Brain) ---
-st.subheader("🤖 Agent Chat")
-
+# --- 5. CHAT COMMAND CENTER ---
+st.subheader("🤖 Command Chimera")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# Display history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
 
-if prompt := st.chat_input("Command the agent (e.g. 'Read the sheet and suggest revisions')"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+if user_query := st.chat_input("Ex: 'Read my sheet and suggest a rewrite for the intro'"):
+    st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.write(user_query)
 
     with st.chat_message("assistant"):
-        with st.spinner("Processing through Chimera..."):
-            # LOGIC: If user asks to read the sheet
-            context = ""
-            if "read" in prompt.lower() and sheet_id:
-                sheet_data = sheets_api.spreadsheets().values().get(spreadsheetId=sheet_id, range="A1:C10").execute()
-                context = f"Here is the latest critique data from the sheet: {sheet_data.get('values', [])}"
-            
-            # Call OpenRouter
-            headers = {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"}
+        with st.spinner("Agent is thinking..."):
+            # Context Fetching Logic
+            sheet_context = ""
+            if sheet_id and status["sheets"] == "🟢":
+                try:
+                    res = apis["sheets"].spreadsheets().values().get(spreadsheetId=sheet_id, range="A1:C10").execute()
+                    sheet_context = f"\n\nContext from Sheets: {res.get('values', [])}"
+                except: pass
+
+            # OpenRouter Call
+            headers = {
+                "Authorization": f"Bearer {st.secrets['OPENROUTER_API_KEY']}",
+                "Content-Type": "application/json"
+            }
             payload = {
                 "model": "openrouter/auto",
                 "messages": [
-                    {"role": "system", "content": "You are a master YA editor. Use the context provided to suggest edits in 'Find | Replace' format."},
-                    {"role": "user", "content": f"{context}\n\nUser Instruction: {prompt}"}
+                    {"role": "system", "content": "You are a YA editor. Give suggestions as 'Find: [text] | Replace: [text]'."},
+                    {"role": "user", "content": f"{user_query} {sheet_context}"}
                 ]
             }
-            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
-            response_text = res.json()['choices'][0]['message']['content']
-            st.markdown(response_text)
-            st.session_state.messages.append({"role": "assistant", "content": response_text})
+            try:
+                r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+                ans = r.json()['choices'][0]['message']['content']
+                st.write(ans)
+                st.session_state.messages.append({"role": "assistant", "content": ans})
+            except Exception as e:
+                st.error(f"Chimera Error: {e}")
 
-# --- 6. EXECUTION TABLE (The Hands) ---
+# --- 6. EXECUTION TABLE ---
 st.divider()
-st.subheader("⚡ Execution Engine")
-st.caption("Paste the suggestions from the chat above into this table to execute them on the live document.")
+st.subheader("⚡ Batch Execution Engine")
+if 'edits' not in st.session_state:
+    st.session_state.edits = [{"Find": "", "Replace": ""}]
 
-if 'batch_data' not in st.session_state:
-    st.session_state.batch_data = [{"Find": "", "Replace": ""}]
+final_df = st.data_editor(st.session_state.edits, num_rows="dynamic", use_container_width=True)
 
-edited_df = st.data_editor(st.session_state.batch_data, num_rows="dynamic", use_container_width=True)
-
-if st.button("🚀 Push Revisions to Google Doc"):
-    actions = [row for row in edited_df if row["Find"]]
-    if actions:
-        with st.spinner("Updating Manuscript..."):
-            bulk_req = [{'replaceAllText': {'containsText': {'text': r['Find'], 'matchCase': True}, 'replaceText': r['Replace']}} for r in actions]
-            docs_api.documents().batchUpdate(documentId=doc_id, body={'requests': bulk_req}).execute()
-            st.success("Revisions Applied! Manuscript Updated.")
+if st.button("🚀 Execute Changes on Google Doc"):
+    valid = [r for r in final_df if r["Find"]]
+    if valid and apis["docs"]:
+        with st.spinner("Applying edits..."):
+            reqs = [{'replaceAllText': {'containsText': {'text': x['Find'], 'matchCase': True}, 'replaceText': x['Replace']}} for x in valid]
+            apis["docs"].documents().batchUpdate(documentId=doc_id, body={'requests': reqs}).execute()
+            st.success("Revisions Pushed Successfully!")
             st.balloons()
