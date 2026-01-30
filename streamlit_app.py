@@ -3,116 +3,114 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import requests
 import json
+import re
 
-# --- 1. PAGE SETUP ---
-st.set_page_config(page_title="Grimoire Master Agent", layout="wide", page_icon="🔮")
+# --- 1. HARDCODED CONFIGURATION ---
+MANUSCRIPT_ID = "1VE-YIgjO33Heb7iIma2lJ23B90Rdaqq5gWsEbcfL2VE"
+LIBRARY_SHEET_ID = "1TR1Rhk4yqa57HD0dEKGOhrNq5aWxAF7LSrpM138UFPs"
 
-# Safer CSS Injection
-st.markdown("### 🔮 Grimoire Master Agent")
+st.set_page_config(page_title="Grimoire Master Agent", layout="wide")
 
-# --- 2. CONNECTOR LOGIC ---
-def check_connections():
-    results = {"docs": "🔴", "sheets": "🔴", "drive": "🔴", "chimera": "🔴"}
-    services = {"docs": None, "sheets": None, "drive": None}
-    
+# --- 2. AUTHENTICATION FIX ---
+@st.cache_resource
+def get_gcp_services():
     try:
-        if "gcp_service_account" in st.secrets:
-            info = st.secrets["gcp_service_account"]
-            creds = service_account.Credentials.from_service_account_info(
-                info, 
-                scopes=[
-                    'https://www.googleapis.com/auth/documents',
-                    'https://www.googleapis.com/auth/drive',
-                    'https://www.googleapis.com/auth/spreadsheets'
-                ]
-            )
-            services["docs"] = build('docs', 'v1', credentials=creds)
-            services["sheets"] = build('sheets', 'v4', credentials=creds)
-            services["drive"] = build('drive', 'v3', credentials=creds)
-            results["docs"], results["sheets"], results["drive"] = "🟢", "🟢", "🟢"
+        # Pulling directly from the key name we verified earlier
+        info = st.secrets["gcp_service_account"]
+        creds = service_account.Credentials.from_service_account_info(
+            info, 
+            scopes=[
+                'https://www.googleapis.com/auth/documents',
+                'https://www.googleapis.com/auth/drive',
+                'https://www.googleapis.com/auth/spreadsheets'
+            ]
+        )
+        return {
+            "docs": build('docs', 'v1', credentials=creds),
+            "sheets": build('sheets', 'v4', credentials=creds),
+            "drive": build('drive', 'v3', credentials=creds)
+        }
     except Exception as e:
-        st.sidebar.error(f"Google Connection Failed: {e}")
+        st.error(f"Authentication Failed: {e}")
+        return None
 
-    if st.secrets.get("OPENROUTER_API_KEY"):
-        results["chimera"] = "🟢"
+services = get_gcp_services()
+OR_KEY = st.secrets.get("OPENROUTER_API_KEY")
+
+# --- 3. UI: CONNECTION STATUS ---
+st.title("🔮 Grimoire Editorial Agent")
+c1, c2, c3 = st.columns(3)
+c1.success("📖 Manuscript Linked") if services else c1.error("📖 Manuscript Offline")
+c2.success("📚 Library Linked") if services else c2.error("📚 Library Offline")
+c3.success("🧠 Chimera Active") if OR_KEY else c3.error("🧠 Chimera Offline")
+
+# --- 4. INTELLIGENCE GATHERING ---
+def get_story_context():
+    if not services: return ""
+    # Pull first 10 rows of Library Sheet (Story Objectives)
+    sheet = services["sheets"].spreadsheets().values().get(
+        spreadsheetId=LIBRARY_SHEET_ID, range="A1:C20").execute()
+    return str(sheet.get('values', []))
+
+def get_manuscript_end():
+    if not services: return ""
+    doc = services["docs"].documents().get(documentId=MANUSCRIPT_ID).execute()
+    content = doc.get('body').get('content')
+    full_text = ""
+    for val in content:
+        if 'paragraph' in val:
+            for el in val.get('paragraph').get('elements'):
+                full_text += el.get('textRun', {}).get('content', '')
+    # Return last 3000 chars for context
+    return full_text[-3000:]
+
+# --- 5. CHAT & GENERATION ---
+tab1, tab2 = st.tabs(["✍️ Editorial Assistant", "📖 Chapter Generator"])
+
+with tab1:
+    st.subheader("Editorial Recommendations")
+    instruction = st.text_area("What should the agent look for?", "Analyze the prose for 'YA-grit' and suggest 3 visceral improvements.")
+    
+    if st.button("Generate Recommendations"):
+        context = f"STORY RULES: {get_story_context()}\n\nMANUSCRIPT: {get_manuscript_end()}"
+        headers = {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"}
+        data = {
+            "model": "openrouter/auto",
+            "messages": [{"role": "system", "content": "You are a YA editor. Return JSON only: [{'find': '...', 'replace': '...'}]"},
+                         {"role": "user", "content": f"{context}\n\nTask: {instruction}"}]
+        }
+        res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
+        # Parse suggestions into session state for approval
+        try:
+            raw_content = res.json()['choices'][0]['message']['content']
+            # Simple regex to find JSON in case the model adds chatter
+            json_str = re.search(r'\[.*\]', raw_content, re.DOTALL).group()
+            st.session_state.pending_edits = json.loads(json_str)
+        except:
+            st.error("Chimera had trouble formatting the JSON. Try again.")
+
+    # Approval Gallery
+    if "pending_edits" in st.session_state:
+        st.write("### Approve Changes")
+        final_selections = []
+        for i, edit in enumerate(st.session_state.pending_edits):
+            col_a, col_b = st.columns([0.1, 0.9])
+            if col_a.checkbox("Apply", key=f"edit_{i}"):
+                final_selections.append(edit)
+            col_b.info(f"**Find:** {edit['find']}\n\n**Replace:** {edit['replace']}")
         
-    return services, results
+        if st.button("🚀 Execute Approved Changes"):
+            reqs = [{'replaceAllText': {'containsText': {'text': e['find'], 'matchCase': True}, 'replaceText': e['replace']}} for e in final_selections]
+            services["docs"].documents().batchUpdate(documentId=MANUSCRIPT_ID, body={'requests': reqs}).execute()
+            st.success("Revisions Pushed!")
+            del st.session_state.pending_edits
 
-apis, status = check_connections()
-
-# --- 3. STATUS HEADER ---
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Docs API", status["docs"])
-col2.metric("Sheets API", status["sheets"])
-col3.metric("Drive API", status["drive"])
-col4.metric("Chimera (OR)", status["chimera"])
-
-st.divider()
-
-# --- 4. WORKSPACE CONFIG ---
-with st.expander("📂 Workspace & File IDs", expanded=True):
-    c1, c2 = st.columns(2)
-    doc_id = c1.text_input("Active Manuscript (Doc ID)", "1VE-YIgjO33Heb7iIma2lJ23B90Rdaqq5gWsEbcfL2VE")
-    sheet_id = c2.text_input("Critique Tracker (Sheet ID)", "")
-
-# --- 5. CHAT COMMAND CENTER ---
-st.subheader("🤖 Command Chimera")
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Display history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-
-if user_query := st.chat_input("Ex: 'Read my sheet and suggest a rewrite for the intro'"):
-    st.session_state.messages.append({"role": "user", "content": user_query})
-    with st.chat_message("user"):
-        st.write(user_query)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Agent is thinking..."):
-            # Context Fetching Logic
-            sheet_context = ""
-            if sheet_id and status["sheets"] == "🟢":
-                try:
-                    res = apis["sheets"].spreadsheets().values().get(spreadsheetId=sheet_id, range="A1:C10").execute()
-                    sheet_context = f"\n\nContext from Sheets: {res.get('values', [])}"
-                except: pass
-
-            # OpenRouter Call
-            headers = {
-                "Authorization": f"Bearer {st.secrets['OPENROUTER_API_KEY']}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "openrouter/auto",
-                "messages": [
-                    {"role": "system", "content": "You are a YA editor. Give suggestions as 'Find: [text] | Replace: [text]'."},
-                    {"role": "user", "content": f"{user_query} {sheet_context}"}
-                ]
-            }
-            try:
-                r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
-                ans = r.json()['choices'][0]['message']['content']
-                st.write(ans)
-                st.session_state.messages.append({"role": "assistant", "content": ans})
-            except Exception as e:
-                st.error(f"Chimera Error: {e}")
-
-# --- 6. EXECUTION TABLE ---
-st.divider()
-st.subheader("⚡ Batch Execution Engine")
-if 'edits' not in st.session_state:
-    st.session_state.edits = [{"Find": "", "Replace": ""}]
-
-final_df = st.data_editor(st.session_state.edits, num_rows="dynamic", use_container_width=True)
-
-if st.button("🚀 Execute Changes on Google Doc"):
-    valid = [r for r in final_df if r["Find"]]
-    if valid and apis["docs"]:
-        with st.spinner("Applying edits..."):
-            reqs = [{'replaceAllText': {'containsText': {'text': x['Find'], 'matchCase': True}, 'replaceText': x['Replace']}} for x in valid]
-            apis["docs"].documents().batchUpdate(documentId=doc_id, body={'requests': reqs}).execute()
-            st.success("Revisions Pushed Successfully!")
-            st.balloons()
+with tab2:
+    st.subheader("Next Chapter Generation")
+    if st.button("Draft Next Chapter"):
+        with st.spinner("Consulting the Grimoire Library..."):
+            context = f"RULES: {get_story_context()}\n\nPREVIOUS TEXT: {get_manuscript_end()}"
+            # Request Chimera to write next chapter
+            # (Logic for Chapter X+1 header detection goes here)
+            st.write("Chimera is drafting... [This is where the long-form text will appear]")
+            # Option to 'Append to Doc' would be here
